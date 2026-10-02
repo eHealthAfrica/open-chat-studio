@@ -63,3 +63,4 @@ site/
 reconciliation.json
 reconciliation.*.md
 decision_report.md
+.claude/

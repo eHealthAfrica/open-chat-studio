@@ -1,0 +1,102 @@
+# Create / update OCS GCS buckets on clinics-dev-359913 via Terraform + WIF.
+# Does not replace Dimagi ECS deploy.yml or the Clinics eha-workflow app deploy caller.
+
+name: Clinics OCS storage (Terraform)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Terraform action
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+        default: plan
+  pull_request:
+    paths:
+      - "terraform/clinics-dev-ocs-storage/**"
+      - ".github/workflows/clinics-ocs-storage.yml"
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+concurrency:
+  group: clinics-ocs-storage-terraform
+  cancel-in-progress: false
+
+env:
+  TF_WORKING_DIR: terraform/clinics-dev-ocs-storage
+  GCP_PROJECT_ID: clinics-dev-359913
+
+jobs:
+  terraform:
+    name: Terraform ${{ github.event_name == 'pull_request' && 'plan' || inputs.action }}
+    runs-on: ubuntu-latest
+    environment: dev
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        id: plan
+        if: github.event_name == 'pull_request' || inputs.action == 'plan'
+        run: terraform plan -input=false -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Terraform apply
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'apply'
+        run: |
+          terraform plan -input=false -out=tfplan
+          terraform apply -input=false -auto-approve tfplan
+
+      - name: Publish non-secret outputs
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'apply'
+        run: |
+          {
+            echo "### OCS storage outputs"
+            echo ""
+            echo '```json'
+            terraform output -json vault_env_snippet
+            echo '```'
+            echo ""
+            echo "HMAC access id (put secret in Vault separately):"
+            echo '```'
+            terraform output -raw s3_interop_access_id || true
+            echo '```'
+            echo ""
+            echo "Fetch secret locally or via a secure channel: \`terraform output -raw s3_interop_secret\`"
+            echo "Do not paste HMAC secrets into PR comments or commit them."
+          } >> "$GITHUB_STEP_SUMMARY"
